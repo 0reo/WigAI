@@ -199,4 +199,83 @@ class ClipSceneControllerTest {
 
         verify(bitwigApiFacade).launchClip(trackName, clipIndex);
     }
+
+    @Test
+    void testGetSelectedArrangerClip_ClipSelected() {
+        // Arrange: facade reports a selected arranger clip
+        java.util.Map<String, Object> facadeInfo = new java.util.LinkedHashMap<>();
+        facadeInfo.put("has_selected_arranger_clip", true);
+        facadeInfo.put("start", 4.0);
+        facadeInfo.put("length", 8.0);
+        facadeInfo.put("play_stop", 12.0);
+        facadeInfo.put("loop_enabled", true);
+        facadeInfo.put("loop_start", 4.0);
+        facadeInfo.put("loop_length", 8.0);
+        facadeInfo.put("track_name", "Bass");
+        facadeInfo.put("track_index", 2);
+        when(bitwigApiFacade.getSelectedArrangerClipInfo()).thenReturn(facadeInfo);
+
+        // Act
+        java.util.Map<String, Object> result = controller.getSelectedArrangerClip();
+
+        // Assert: controller adds a distinct past-tense action event name, not the tool name
+        assertEquals("arranger_clip_introspected", result.get("action"));
+        assertEquals(true, result.get("has_selected_arranger_clip"));
+        assertEquals(4.0, result.get("start"));
+        assertEquals(8.0, result.get("length"));
+        assertEquals(12.0, result.get("play_stop"));
+        assertEquals("Bass", result.get("track_name"));
+        assertEquals(2, result.get("track_index"));
+
+        verify(bitwigApiFacade).getSelectedArrangerClipInfo();
+    }
+
+    @Test
+    void testGetSelectedArrangerClip_NoClipSelected() {
+        // Arrange: facade reports no selected arranger clip
+        java.util.Map<String, Object> facadeInfo = new java.util.LinkedHashMap<>();
+        facadeInfo.put("has_selected_arranger_clip", false);
+        facadeInfo.put("start", null);
+        facadeInfo.put("length", null);
+        facadeInfo.put("play_stop", null);
+        facadeInfo.put("loop_enabled", null);
+        facadeInfo.put("loop_start", null);
+        facadeInfo.put("loop_length", null);
+        facadeInfo.put("track_name", null);
+        facadeInfo.put("track_index", null);
+        when(bitwigApiFacade.getSelectedArrangerClipInfo()).thenReturn(facadeInfo);
+
+        // Act
+        java.util.Map<String, Object> result = controller.getSelectedArrangerClip();
+
+        // Assert
+        assertEquals("arranger_clip_introspected", result.get("action"));
+        assertEquals(false, result.get("has_selected_arranger_clip"));
+        assertNull(result.get("start"));
+        assertNull(result.get("track_name"));
+
+        verify(bitwigApiFacade).getSelectedArrangerClipInfo();
+    }
+
+    @Test
+    void testGetSelectedArrangerClip_WrapsUnexpectedError() {
+        // Arrange: facade throws an unexpected (non-BitwigApiException) runtime error
+        when(bitwigApiFacade.getSelectedArrangerClipInfo()).thenThrow(new RuntimeException("boom"));
+
+        // Act & Assert
+        BitwigApiException ex = assertThrows(BitwigApiException.class, () -> controller.getSelectedArrangerClip());
+        assertEquals(ErrorCode.INTERNAL_ERROR, ex.getErrorCode());
+    }
+
+    @Test
+    void testGetSelectedArrangerClip_PropagatesBitwigApiError() {
+        // Arrange: facade reports a genuine Bitwig API failure (must NOT be masked as success)
+        when(bitwigApiFacade.getSelectedArrangerClipInfo()).thenThrow(
+            new BitwigApiException(ErrorCode.BITWIG_API_ERROR, "get_selected_arranger_clip",
+                "Failed to read selected arranger clip: host error"));
+
+        // Act & Assert: the controller surfaces the original error code unchanged
+        BitwigApiException ex = assertThrows(BitwigApiException.class, () -> controller.getSelectedArrangerClip());
+        assertEquals(ErrorCode.BITWIG_API_ERROR, ex.getErrorCode());
+    }
 }

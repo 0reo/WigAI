@@ -52,6 +52,7 @@ public class BitwigApiFacade {
     private final CursorTrack cursorTrack;
     private final RemoteControlsPage projectParameterBank;
     private final List<DeviceBank> trackDeviceBanks;
+    private final Clip arrangerCursorClip;
 
     /**
      * Creates a new BitwigApiFacade instance.
@@ -88,6 +89,14 @@ public class BitwigApiFacade {
         // Initialize project parameter access via MasterTrack (project parameters)
         MasterTrack masterTrack = host.createMasterTrack(0);
         this.projectParameterBank = masterTrack.createCursorRemoteControlsPage(Constants.PROJECT_PARAMETER_COUNT);
+
+        // Initialize the arranger cursor clip. This is the ONLY arranger-clip handle the
+        // Bitwig Extension API (v19) exposes: a single cursor that follows the user's
+        // currently-selected arranger clip. There is no per-track arranger clip bank, so
+        // this can only introspect the selected clip (see getSelectedArrangerClipInfo()).
+        // The grid dimensions are irrelevant here because we only read clip-level beat
+        // values (start/stop/loop), never step data.
+        this.arrangerCursorClip = host.createArrangerCursorClip(1, 1);
 
         // Initialize track bank for clip launching (support up to 128 tracks and 128 scenes for full functionality)
         this.trackBank = host.createTrackBank(Constants.MAX_TRACKS, 0, Constants.MAX_SCENES);
@@ -202,6 +211,19 @@ public class BitwigApiFacade {
                 slot.name().markInterested();
             }
         }
+
+        // Mark interest in arranger cursor clip properties so values are readable.
+        arrangerCursorClip.exists().markInterested();
+        arrangerCursorClip.getPlayStart().markInterested();
+        arrangerCursorClip.getPlayStop().markInterested();
+        arrangerCursorClip.isLoopEnabled().markInterested();
+        arrangerCursorClip.getLoopStart().markInterested();
+        arrangerCursorClip.getLoopLength().markInterested();
+        arrangerCursorClip.color().markInterested();
+        Track arrangerClipTrack = arrangerCursorClip.getTrack();
+        arrangerClipTrack.name().markInterested();
+        arrangerClipTrack.position().markInterested();
+        arrangerClipTrack.exists().markInterested();
     }
 
     // ========================================
@@ -664,6 +686,97 @@ public class BitwigApiFacade {
         }
 
         return slotInfo;
+    }
+
+    /**
+     * Introspects the arranger timeline clip that is currently selected by the user.
+     *
+     * <p><b>API limitation:</b> Bitwig Extension API v19 exposes no way to enumerate the
+     * clips on the arranger timeline, nor any per-track "has arranger content" flag. The
+     * only arranger-clip handle is {@code ControllerHost.createArrangerCursorClip(...)},
+     * a single cursor that follows the user's currently-selected arranger clip. This
+     * method therefore reports the selected clip only; it cannot survey tracks. The read
+     * is non-mutating: it reflects the user's existing selection and never moves the
+     * cursor. Arranger clips also expose no readable name ({@code Clip} only has
+     * {@code setName}), so no clip name is returned.
+     *
+     * @return A map describing the selected arranger clip. When a clip is selected it
+     *         contains {@code has_selected_arranger_clip=true} plus {@code start},
+     *         {@code length}, {@code play_stop}, {@code loop_enabled}, {@code loop_start},
+     *         {@code loop_length}, {@code track_name} and {@code track_index} (beat-time
+     *         values are in quarter-note beats). When no arranger clip is selected it
+     *         contains {@code has_selected_arranger_clip=false} and null detail fields.
+     */
+    public Map<String, Object> getSelectedArrangerClipInfo() throws BitwigApiException {
+        final String operation = "get_selected_arranger_clip";
+        logger.info("BitwigApiFacade: Getting selected arranger clip info");
+
+        Map<String, Object> info = new LinkedHashMap<>();
+
+        try {
+            boolean exists = arrangerCursorClip.exists().get();
+            info.put("has_selected_arranger_clip", exists);
+
+            if (!exists) {
+                // Legitimate "nothing selected" result, not an error.
+                info.put("start", null);
+                info.put("length", null);
+                info.put("play_stop", null);
+                info.put("loop_enabled", null);
+                info.put("loop_start", null);
+                info.put("loop_length", null);
+                info.put("track_name", null);
+                info.put("track_index", null);
+                logger.info("BitwigApiFacade: No arranger clip is currently selected");
+                return info;
+            }
+
+            double playStart = arrangerCursorClip.getPlayStart().get();
+            double playStop = arrangerCursorClip.getPlayStop().get();
+
+            info.put("start", playStart);
+            info.put("length", playStop - playStart);
+            info.put("play_stop", playStop);
+            info.put("loop_enabled", arrangerCursorClip.isLoopEnabled().get());
+            info.put("loop_start", arrangerCursorClip.getLoopStart().get());
+            info.put("loop_length", arrangerCursorClip.getLoopLength().get());
+
+            // Resolving the clip's owning track is a secondary lookup: if it fails we still
+            // return the primary timeline data with null track fields rather than failing the
+            // whole call. A genuine failure reading the clip's timeline data above, by
+            // contrast, propagates as an error (see catch below) so callers can distinguish
+            // it from the "nothing selected" case.
+            Track clipTrack = arrangerCursorClip.getTrack();
+            String trackName = null;
+            Integer trackIndex = null;
+            try {
+                if (clipTrack.exists().get()) {
+                    trackName = clipTrack.name().get();
+                    if (trackName != null && trackName.trim().isEmpty()) {
+                        trackName = null;
+                    }
+                    int resolvedIndex = getTrackIndexByName(trackName);
+                    trackIndex = resolvedIndex >= 0 ? resolvedIndex : null;
+                }
+            } catch (Exception e) {
+                logger.warn("BitwigApiFacade: Unable to read arranger clip's owning track: " + e.getMessage());
+            }
+            info.put("track_name", trackName);
+            info.put("track_index", trackIndex);
+
+            logger.info("BitwigApiFacade: Retrieved selected arranger clip info (start=" + playStart + ", length=" + (playStop - playStart) + ")");
+            return info;
+        } catch (Exception e) {
+            // A genuine Bitwig API / runtime failure must NOT masquerade as "no clip
+            // selected" — surface it distinctly so the caller can tell the two apart.
+            logger.error("BitwigApiFacade: Error getting selected arranger clip info: " + e.getMessage());
+            throw new BitwigApiException(
+                ErrorCode.BITWIG_API_ERROR,
+                operation,
+                "Failed to read selected arranger clip: " + e.getMessage(),
+                Map.of()
+            );
+        }
     }
 
     /**

@@ -120,6 +120,43 @@ public class ClipSceneController {
     }
 
     /**
+     * Introspects the currently-selected arranger timeline clip.
+     *
+     * <p>Read-only. Because Bitwig Extension API v19 provides no per-track arranger clip
+     * enumeration (only a single selection-following cursor clip), this reports the clip
+     * the user currently has selected in the arranger rather than surveying all tracks.
+     * See {@link BitwigApiFacade#getSelectedArrangerClipInfo()} for the full limitation.
+     *
+     * @return A map describing the selected arranger clip, including an {@code action}
+     *         event name and the clip's timeline range.
+     * @throws BitwigApiException if an unexpected internal error occurs
+     */
+    public Map<String, Object> getSelectedArrangerClip() {
+        final String operation = "get_selected_arranger_clip";
+        try {
+            logger.info("Getting selected arranger clip");
+
+            Map<String, Object> info = bitwigApiFacade.getSelectedArrangerClipInfo();
+
+            Map<String, Object> data = new LinkedHashMap<>();
+            data.put("action", "arranger_clip_introspected");
+            data.putAll(info);
+            return data;
+        } catch (BitwigApiException e) {
+            logger.error("Failed to get selected arranger clip: " + e.getMessage());
+            throw e;
+        } catch (Exception e) {
+            logger.error("Unexpected error getting selected arranger clip: " + e.getMessage(), e);
+            throw new BitwigApiException(
+                ErrorCode.INTERNAL_ERROR,
+                operation,
+                "Internal error occurred while getting selected arranger clip: " + e.getMessage(),
+                Map.of()
+            );
+        }
+    }
+
+    /**
      * Gets detailed information for all clips within a specific scene.
      *
      * @param sceneIndex The zero-based index of the scene (optional if sceneName provided)
