@@ -37,6 +37,11 @@ public class BitwigApiFacade {
         public static final int SIXTEENTHS_PER_BEAT = 4;
         public static final int DEVICE_PARAMETER_COUNT = 8;
         public static final int PROJECT_PARAMETER_COUNT = 8;
+        // Maximum group nesting depth we resolve for parent/depth computation.
+        // Bitwig itself has no hard limit, but in practice projects rarely nest
+        // beyond a handful of levels; tracks deeper than this are reported with
+        // a clamped depth and best-effort parent.
+        public static final int MAX_GROUP_NESTING_DEPTH = 8;
 
         private Constants() {} // Prevent instantiation
     }
@@ -52,6 +57,19 @@ public class BitwigApiFacade {
     private final CursorTrack cursorTrack;
     private final RemoteControlsPage projectParameterBank;
     private final List<DeviceBank> trackDeviceBanks;
+    /**
+     * The project's root track group. Used as the identity anchor for computing
+     * how deeply a track is nested: a track whose parent chain reaches the root
+     * group at hop {@code k} has depth {@code k}.
+     */
+    private final Track rootTrackGroup;
+    /**
+     * Per bank-slot parent-chain identity values. {@code parentChainEqualsRoot.get(i).get(k)}
+     * is a {@link BooleanValue} that is {@code true} when the {@code (k+1)}-th ancestor of the
+     * track at bank index {@code i} is the project root track group. These are created once in the
+     * constructor and marked interested so the values are populated by the time tracks are read.
+     */
+    private final List<List<BooleanValue>> parentChainEqualsRoot;
 
     /**
      * Creates a new BitwigApiFacade instance.
@@ -89,16 +107,41 @@ public class BitwigApiFacade {
         MasterTrack masterTrack = host.createMasterTrack(0);
         this.projectParameterBank = masterTrack.createCursorRemoteControlsPage(Constants.PROJECT_PARAMETER_COUNT);
 
-        // Initialize track bank for clip launching (support up to 128 tracks and 128 scenes for full functionality)
-        this.trackBank = host.createTrackBank(Constants.MAX_TRACKS, 0, Constants.MAX_SCENES);
+        // Initialize track bank for clip launching and track listing (support up to 128 tracks and 128 scenes).
+        // The fourth argument (hasFlatTrackList=true) makes the bank a *full flat* track list: every track in the
+        // project, including tracks nested inside group tracks, is enumerated in visual (depth-first) order. With the
+        // default 3-arg bank only top-level tracks are visible, which is why nested children were previously missing.
+        this.trackBank = host.createTrackBank(Constants.MAX_TRACKS, 0, Constants.MAX_SCENES, true);
         this.sceneBankFacade = new SceneBankFacade(host, logger, Constants.MAX_SCENES); // Support up to 128 scenes for full functionality
+
+        // The root track group is the identity anchor for depth computation. A track is at depth 0 (top-level) when
+        // its immediate parent is the root group; depth N when the N-th ancestor up is the root group.
+        this.rootTrackGroup = host.getProject().getRootTrackGroup();
 
         // Initialize device banks for each track to enable device enumeration
         this.trackDeviceBanks = new ArrayList<>();
+        // Pre-create the parent-chain identity values for each bank slot. Bitwig values populate asynchronously after
+        // markInterested() + a flush cycle, so these MUST be created here (not on-demand at query time) or they read
+        // back as defaults. This is the root cause of the previously-always-null parent_group_index.
+        this.parentChainEqualsRoot = new ArrayList<>();
         for (int i = 0; i < trackBank.getSizeOfBank(); i++) {
             Track track = trackBank.getItemAt(i);
             DeviceBank deviceBank = track.createDeviceBank(Constants.MAX_DEVICES_PER_TRACK);
             trackDeviceBanks.add(deviceBank);
+
+            // Walk up to MAX_GROUP_NESTING_DEPTH ancestors, recording for each whether it is the root group.
+            List<BooleanValue> chain = new ArrayList<>();
+            Track ancestor = track;
+            for (int level = 0; level < Constants.MAX_GROUP_NESTING_DEPTH; level++) {
+                ancestor = ancestor.createParentTrack(0, 0);
+                if (ancestor == null) {
+                    break;
+                }
+                BooleanValue equalsRoot = ancestor.createEqualsValue(rootTrackGroup);
+                equalsRoot.markInterested();
+                chain.add(equalsRoot);
+            }
+            parentChainEqualsRoot.add(chain);
         }
 
         // Mark interest in device properties to enable value access
@@ -940,8 +983,11 @@ public class BitwigApiFacade {
                 selectedTrackName = cursorTrack.name().get();
             }
 
-            // Create parent track mapping to determine parent group indices
-            Map<String, Integer> parentGroupMapping = buildParentGroupMapping();
+            // Compute the group hierarchy (depth + parent group index) for the whole flat bank up front.
+            // This MUST be done over the unfiltered list: parent_group_index references group tracks by their
+            // absolute bank index, and the parent walk relies on seeing every track in order. Filtering is applied
+            // afterwards when emitting, so filtered output still carries correct parent references.
+            TrackHierarchy hierarchy = computeTrackHierarchy();
 
             for (int i = 0; i < trackBank.getSizeOfBank(); i++) {
                 Track track = trackBank.getItemAt(i);
@@ -966,8 +1012,9 @@ public class BitwigApiFacade {
 
                 trackInfo.put("is_group", track.isGroup().get());
 
-                // Get parent group index from mapping
-                trackInfo.put("parent_group_index", parentGroupMapping.get(trackName));
+                // Group hierarchy: parent group index (null for top-level) and nesting depth (0 for top-level).
+                trackInfo.put("parent_group_index", hierarchy.parentGroupIndex[i]);
+                trackInfo.put("depth", hierarchy.depth[i]);
 
                 // Get track activation status
                 trackInfo.put("activated", track.isActivated().get());
@@ -1051,52 +1098,104 @@ public class BitwigApiFacade {
     }
 
     /**
-     * Builds a mapping of track names to their parent group track indices.
-     * This creates parent track objects for each track to determine hierarchy.
+     * Holder for the computed group hierarchy of the flat track bank, indexed by absolute bank slot.
      *
-     * @return A map where keys are track names and values are parent group indices (null if no parent)
+     * @param depth            nesting depth per slot: 0 for top-level tracks, 1 for direct children of a top-level
+     *                         group, etc. Slots for non-existent tracks are left at 0.
+     * @param parentGroupIndex parent group bank index per slot: {@code null} for top-level tracks, otherwise the
+     *                         absolute bank index of the enclosing group track.
      */
-    private Map<String, Integer> buildParentGroupMapping() {
-        Map<String, Integer> parentMapping = new LinkedHashMap<>();
+    private record TrackHierarchy(int[] depth, Integer[] parentGroupIndex) {}
 
-        try {
-            for (int i = 0; i < trackBank.getSizeOfBank(); i++) {
+    /**
+     * Computes the group nesting depth and parent group index for every slot in the flat track bank.
+     *
+     * <p>The flat track bank ({@code hasFlatTrackList=true}) lists tracks in visual, depth-first order: a group is
+     * immediately followed by its children. Depth is derived from each track's pre-created parent chain by finding the
+     * first ancestor that is the project root group (see {@link #parentChainEqualsRoot}). The parent group index is
+     * then resolved purely from depth and order: as we walk the list, the most recently seen group at depth {@code d}
+     * is the parent of any subsequent track at depth {@code d + 1}.</p>
+     *
+     * @return a {@link TrackHierarchy} with depth and parent group index arrays sized to the bank
+     */
+    private TrackHierarchy computeTrackHierarchy() {
+        int bankSize = trackBank.getSizeOfBank();
+        int[] depth = new int[bankSize];
+        Integer[] parentGroupIndex = new Integer[bankSize];
+
+        // lastGroupIndexAtDepth[d] = bank index of the most recent group track seen at depth d, or -1 if none yet.
+        int[] lastGroupIndexAtDepth = new int[Constants.MAX_GROUP_NESTING_DEPTH + 1];
+        java.util.Arrays.fill(lastGroupIndexAtDepth, -1);
+
+        // Each slot is guarded independently: a read failure on one track must NOT abort the walk, because the
+        // running lastGroupIndexAtDepth state drives parent resolution for every subsequent track. Aborting would
+        // silently flatten the entire remainder of the list to depth 0 / no parent.
+        for (int i = 0; i < bankSize; i++) {
+            try {
                 Track track = trackBank.getItemAt(i);
                 if (!track.exists().get()) {
-                    continue;
+                    continue; // Leave defaults (depth 0, null parent) for empty slots; they are never emitted.
                 }
 
-                String trackName = track.name().get();
-                Integer parentGroupIndex = null;
+                int d = computeDepth(i);
+                depth[i] = d;
 
-                try {
-                    // Create parent track object to check for parent group
-                    Track parentTrack = track.createParentTrack(0, 0);
-                    if (parentTrack != null && parentTrack.exists().get()) {
-                        String parentName = parentTrack.name().get();
+                // The parent group is the most recent group one level shallower than this track.
+                if (d > 0 && (d - 1) < lastGroupIndexAtDepth.length) {
+                    int parentIdx = lastGroupIndexAtDepth[d - 1];
+                    parentGroupIndex[i] = parentIdx >= 0 ? parentIdx : null;
+                } else {
+                    parentGroupIndex[i] = null; // Top-level track.
+                }
 
-                        // Find the index of the parent track in our track bank
-                        for (int j = 0; j < trackBank.getSizeOfBank(); j++) {
-                            Track candidateParent = trackBank.getItemAt(j);
-                            if (candidateParent.exists().get() &&
-                                candidateParent.isGroup().get() &&
-                                parentName.equals(candidateParent.name().get())) {
-                                parentGroupIndex = j;
-                                break;
-                            }
-                        }
+                // Record this track as the current group for its depth so its children can find it.
+                boolean isGroup = track.isGroup().get();
+                if (isGroup && d < lastGroupIndexAtDepth.length) {
+                    lastGroupIndexAtDepth[d] = i;
+                    // Any deeper "current group" markers are now stale (we have moved to a new branch).
+                    for (int deeper = d + 1; deeper < lastGroupIndexAtDepth.length; deeper++) {
+                        lastGroupIndexAtDepth[deeper] = -1;
                     }
-                } catch (Exception e) {
-                    logger.warn("BitwigApiFacade: Error determining parent for track " + trackName + ": " + e.getMessage());
                 }
-
-                parentMapping.put(trackName, parentGroupIndex);
+            } catch (Exception e) {
+                // Surface the failure rather than silently mis-parenting: this slot keeps its safe defaults
+                // (depth 0, null parent) and is logged so wrong hierarchy data is diagnosable. Because a group
+                // whose isGroup() read failed is never recorded, children below it may resolve to a shallower
+                // group or null — log at error so that corruption is not invisible.
+                logger.error("BitwigApiFacade: Failed to compute hierarchy for track at bank index " + i
+                    + "; it defaults to depth 0/no parent and may mis-parent nested children: " + e.getMessage());
             }
-        } catch (Exception e) {
-            logger.warn("BitwigApiFacade: Error building parent group mapping: " + e.getMessage());
         }
 
-        return parentMapping;
+        return new TrackHierarchy(depth, parentGroupIndex);
+    }
+
+    /**
+     * Computes the nesting depth of the track at the given bank index using its pre-created parent chain.
+     *
+     * <p>The depth is the number of ancestor hops needed to reach the project root group: if the immediate parent is
+     * the root group the track is top-level (depth 0); if the parent's parent is the root group the track sits one
+     * level deep (depth 1); and so on. If no ancestor within {@link Constants#MAX_GROUP_NESTING_DEPTH} levels is the
+     * root group (deeper than we track), the depth is clamped to the maximum.</p>
+     *
+     * @param bankIndex absolute bank index of the track
+     * @return the nesting depth (0 = top-level)
+     */
+    private int computeDepth(int bankIndex) {
+        if (bankIndex < 0 || bankIndex >= parentChainEqualsRoot.size()) {
+            return 0;
+        }
+        List<BooleanValue> chain = parentChainEqualsRoot.get(bankIndex);
+        // A read failure here is intentionally NOT swallowed: it propagates to computeTrackHierarchy's per-slot
+        // handler, which logs it and applies safe defaults. Swallowing it would silently continue the upward walk
+        // and yield a wrong (too-deep) depth that then mis-parents the track and corrupts the stack state.
+        for (int level = 0; level < chain.size(); level++) {
+            if (chain.get(level).get()) {
+                return level; // level 0 => immediate parent is root => top-level => depth 0.
+            }
+        }
+        // No ancestor up to the tracked limit was the root group; clamp to the deepest level we resolve.
+        return chain.isEmpty() ? 0 : chain.size() - 1;
     }
 
     /**
@@ -1162,6 +1261,7 @@ public class BitwigApiFacade {
                 info.put("type", cursorTrack.trackType().get().toLowerCase());
                 info.put("is_group", cursorTrack.isGroup().get());
                 info.put("parent_group_index", null);
+                info.put("depth", 0);
                 info.put("activated", true);
                 info.put("color", Constants.DEFAULT_COLOR);
                 info.put("is_selected", true);
@@ -1205,8 +1305,12 @@ public class BitwigApiFacade {
             String trackType = track.trackType().get().toLowerCase();
             trackInfo.put("type", trackType);
             trackInfo.put("is_group", track.isGroup().get());
-            Map<String, Integer> parentMap = buildParentGroupMapping();
-            trackInfo.put("parent_group_index", parentMap.get(trackName));
+            TrackHierarchy hierarchy = computeTrackHierarchy();
+            Integer parentGroupIndex = (index >= 0 && index < hierarchy.parentGroupIndex.length)
+                ? hierarchy.parentGroupIndex[index] : null;
+            int trackDepth = (index >= 0 && index < hierarchy.depth.length) ? hierarchy.depth[index] : 0;
+            trackInfo.put("parent_group_index", parentGroupIndex);
+            trackInfo.put("depth", trackDepth);
             trackInfo.put("activated", track.isActivated().get());
             trackInfo.put("color", formatTrackColor(track.color().get()));
             // Selected state

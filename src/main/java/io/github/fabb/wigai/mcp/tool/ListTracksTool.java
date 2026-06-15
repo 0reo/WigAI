@@ -43,7 +43,7 @@ public class ListTracksTool {
 
         var tool = McpSchema.Tool.builder()
             .name("list_tracks")
-            .description("List all tracks in the current project with summary information (name, type, selection state, parent group, basic device list). Supports optional filtering by track type.")
+            .description("List all tracks in the current project, including tracks nested inside group tracks, with summary information (name, type, selection state, basic device list). The list is flat and in visual top-to-bottom order; each entry carries 'parent_group_index' (null for top-level tracks, otherwise the index of the enclosing group track) and 'depth' (0 for top-level, 1 for direct children of a group, and so on) so the group hierarchy can be reconstructed. Supports optional filtering by track type.")
             .inputSchema(schema)
             .build();
 

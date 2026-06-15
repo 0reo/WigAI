@@ -97,10 +97,30 @@ public class BitwigApiFacadeTest {
         when(mockHost.createMasterTrack(0)).thenReturn(mockMasterTrack);
         when(mockMasterTrack.createCursorRemoteControlsPage(8)).thenReturn(mockProjectParameterBank);
 
-        // Setup TrackBank mocks (new for clip launching) - use smaller sizes for testing
-        when(mockHost.createTrackBank(128, 0, 128)).thenReturn(mockTrackBank);
+        // Setup TrackBank mocks (flat track list for group hierarchy) - use smaller sizes for testing
+        when(mockHost.createTrackBank(128, 0, 128, true)).thenReturn(mockTrackBank);
         when(mockTrackBank.getSizeOfBank()).thenReturn(8); // Reduced from 128 to 8 for testing
         when(mockTrackBank.getItemAt(anyInt())).thenReturn(mockTrack);
+
+        // Project + root track group, used for group-depth computation
+        Project mockProject = mock(Project.class);
+        Track mockRootTrackGroup = mock(Track.class);
+        lenient().when(mockHost.getProject()).thenReturn(mockProject);
+        lenient().when(mockProject.getRootTrackGroup()).thenReturn(mockRootTrackGroup);
+
+        // Default parent-chain stubs so construction does not NPE. By default every track's immediate parent is the
+        // root group (i.e. top-level, depth 0). Individual hierarchy tests override createParentTrack/createEqualsValue.
+        Track defaultParent = mock(Track.class);
+        lenient().when(mockTrack.createParentTrack(0, 0)).thenReturn(defaultParent);
+        lenient().when(defaultParent.createParentTrack(0, 0)).thenReturn(defaultParent);
+        com.bitwig.extension.controller.api.BooleanValue defaultParentExists =
+            mock(com.bitwig.extension.controller.api.BooleanValue.class);
+        lenient().when(defaultParentExists.get()).thenReturn(true);
+        lenient().when(defaultParent.exists()).thenReturn(defaultParentExists);
+        com.bitwig.extension.controller.api.BooleanValue defaultEqualsRoot =
+            mock(com.bitwig.extension.controller.api.BooleanValue.class);
+        lenient().when(defaultEqualsRoot.get()).thenReturn(true); // immediate parent == root => depth 0
+        lenient().when(defaultParent.createEqualsValue(any())).thenReturn(defaultEqualsRoot);
         when(mockTrack.clipLauncherSlotBank()).thenReturn(mockClipLauncherSlotBank);
         when(mockClipLauncherSlotBank.getSizeOfBank()).thenReturn(8); // Reduced from 128 to 8 for testing
         when(mockClipLauncherSlotBank.getItemAt(anyInt())).thenReturn(mockClipLauncherSlot);
@@ -788,5 +808,222 @@ public class BitwigApiFacadeTest {
 
         // Verify logging
         verify(mockLogger).info("BitwigApiFacade: Getting all scenes info");
+    }
+
+    // ============================================================
+    // Group hierarchy tests (issue #1)
+    // ============================================================
+
+    /**
+     * Builds a mock Track whose immediate parent chain reaches the project root group at the given depth.
+     * A depth of 0 means the immediate parent IS the root (top-level track); depth 1 means the parent's parent
+     * is the root, etc. This mirrors how {@code createParentTrack(0,0).createEqualsValue(rootGroup)} resolves.
+     */
+    private Track buildHierarchyTrack(String name, String type, boolean isGroup, int depthToRoot, Track rootGroup) {
+        Track track = mock(Track.class);
+
+        com.bitwig.extension.controller.api.BooleanValue existsVal = mock(com.bitwig.extension.controller.api.BooleanValue.class);
+        when(existsVal.get()).thenReturn(true);
+        lenient().when(track.exists()).thenReturn(existsVal);
+
+        com.bitwig.extension.controller.api.SettableStringValue nameVal = mock(com.bitwig.extension.controller.api.SettableStringValue.class);
+        lenient().when(nameVal.get()).thenReturn(name);
+        lenient().when(track.name()).thenReturn(nameVal);
+
+        com.bitwig.extension.controller.api.SettableStringValue typeVal = mock(com.bitwig.extension.controller.api.SettableStringValue.class);
+        lenient().when(typeVal.get()).thenReturn(type);
+        lenient().when(track.trackType()).thenReturn(typeVal);
+
+        com.bitwig.extension.controller.api.BooleanValue isGroupVal = mock(com.bitwig.extension.controller.api.BooleanValue.class);
+        lenient().when(isGroupVal.get()).thenReturn(isGroup);
+        lenient().when(track.isGroup()).thenReturn(isGroupVal);
+
+        com.bitwig.extension.controller.api.SettableBooleanValue activatedVal = mock(com.bitwig.extension.controller.api.SettableBooleanValue.class);
+        lenient().when(activatedVal.get()).thenReturn(true);
+        lenient().when(track.isActivated()).thenReturn(activatedVal);
+
+        lenient().when(track.color()).thenReturn(mock(com.bitwig.extension.controller.api.SettableColorValue.class));
+
+        // Channel controls marked interested in the constructor must be non-null.
+        lenient().when(track.mute()).thenReturn(mock(com.bitwig.extension.controller.api.SettableBooleanValue.class));
+        lenient().when(track.solo()).thenReturn(mock(com.bitwig.extension.controller.api.SoloValue.class));
+        lenient().when(track.arm()).thenReturn(mock(com.bitwig.extension.controller.api.SettableBooleanValue.class));
+        lenient().when(track.isMonitoring()).thenReturn(mock(com.bitwig.extension.controller.api.BooleanValue.class));
+        lenient().when(track.monitorMode()).thenReturn(mock(SettableEnumValue.class));
+        RemoteControl vol = mock(RemoteControl.class);
+        lenient().when(vol.value()).thenReturn(mock(SettableRangedValue.class));
+        lenient().when(vol.displayedValue()).thenReturn(mock(SettableStringValue.class));
+        lenient().when(track.volume()).thenReturn(vol);
+        RemoteControl pan = mock(RemoteControl.class);
+        lenient().when(pan.value()).thenReturn(mock(SettableRangedValue.class));
+        lenient().when(pan.displayedValue()).thenReturn(mock(SettableStringValue.class));
+        lenient().when(track.pan()).thenReturn(pan);
+
+        // Send bank and clip launcher slot bank: empty.
+        SendBank sb = mock(SendBank.class);
+        lenient().when(sb.getSizeOfBank()).thenReturn(0);
+        lenient().when(track.sendBank()).thenReturn(sb);
+        ClipLauncherSlotBank slots = mock(ClipLauncherSlotBank.class);
+        lenient().when(slots.getSizeOfBank()).thenReturn(0);
+        lenient().when(track.clipLauncherSlotBank()).thenReturn(slots);
+
+        // Device bank: empty for these tests.
+        DeviceBank db = mock(DeviceBank.class);
+        lenient().when(track.createDeviceBank(anyInt())).thenReturn(db);
+        lenient().when(db.getSizeOfBank()).thenReturn(0);
+
+        // Build the parent chain. Each ancestor's createEqualsValue(root) returns true only at the depth that
+        // identifies this track's nesting level. The chain is long enough for the facade to walk it.
+        Track current = track;
+        for (int level = 0; level <= depthToRoot; level++) {
+            Track parent = mock(Track.class);
+            com.bitwig.extension.controller.api.BooleanValue parentExists = mock(com.bitwig.extension.controller.api.BooleanValue.class);
+            lenient().when(parentExists.get()).thenReturn(true);
+            lenient().when(parent.exists()).thenReturn(parentExists);
+
+            com.bitwig.extension.controller.api.BooleanValue equalsRoot = mock(com.bitwig.extension.controller.api.BooleanValue.class);
+            lenient().when(equalsRoot.get()).thenReturn(level == depthToRoot);
+            lenient().when(parent.createEqualsValue(any())).thenReturn(equalsRoot);
+
+            lenient().when(current.createParentTrack(0, 0)).thenReturn(parent);
+            current = parent;
+        }
+        // Beyond the resolved depth, keep returning a non-root parent so deeper walks terminate cleanly.
+        lenient().when(current.createParentTrack(0, 0)).thenReturn(current);
+
+        return track;
+    }
+
+    /**
+     * Verifies that nested child tracks appear in the flat list with correct depth and parent_group_index,
+     * including the group-in-group ascent case that a naive position-based stack cannot resolve.
+     *
+     * Layout (depth-first, as Bitwig's flat track list returns it):
+     *   0: GroupA   group   depth 0  parent null
+     *   1: ChildA1  audio   depth 1  parent 0
+     *   2: GroupB   group   depth 1  parent 0
+     *   3: ChildB1  audio   depth 2  parent 2
+     *   4: ChildB2  audio   depth 2  parent 2
+     *   5: ChildA2  audio   depth 1  parent 0   (ascent back to GroupA)
+     *   6: Top      audio   depth 0  parent null
+     */
+    @Test
+    void testGetAllTracksInfo_NestedGroupHierarchy() {
+        Track rootGroup = mock(Track.class);
+        Project hierarchyProject = mock(Project.class);
+        when(mockHost.getProject()).thenReturn(hierarchyProject);
+        when(hierarchyProject.getRootTrackGroup()).thenReturn(rootGroup);
+
+        Track[] tracks = new Track[] {
+            buildHierarchyTrack("GroupA", "GROUP", true, 0, rootGroup),
+            buildHierarchyTrack("ChildA1", "AUDIO", false, 1, rootGroup),
+            buildHierarchyTrack("GroupB", "GROUP", true, 1, rootGroup),
+            buildHierarchyTrack("ChildB1", "AUDIO", false, 2, rootGroup),
+            buildHierarchyTrack("ChildB2", "AUDIO", false, 2, rootGroup),
+            buildHierarchyTrack("ChildA2", "AUDIO", false, 1, rootGroup),
+            buildHierarchyTrack("Top", "AUDIO", false, 0, rootGroup),
+        };
+
+        when(mockTrackBank.getSizeOfBank()).thenReturn(tracks.length);
+        for (int i = 0; i < tracks.length; i++) {
+            when(mockTrackBank.getItemAt(i)).thenReturn(tracks[i]);
+        }
+
+        // No track selected.
+        com.bitwig.extension.controller.api.BooleanValue cursorExists = mock(com.bitwig.extension.controller.api.BooleanValue.class);
+        when(cursorExists.get()).thenReturn(false);
+        when(mockCursorTrack.exists()).thenReturn(cursorExists);
+
+        // Construct a fresh facade so the parent chains are built from the full graph above.
+        BitwigApiFacade facade = new BitwigApiFacade(mockHost, mockLogger);
+
+        java.util.List<java.util.Map<String, Object>> result = facade.getAllTracksInfo(null);
+
+        // All seven tracks (including nested children) must be present.
+        assertEquals(7, result.size(), "Flat list must include nested child tracks");
+
+        assertTrackHierarchy(result.get(0), "GroupA", true, null, 0);
+        assertTrackHierarchy(result.get(1), "ChildA1", false, 0, 1);
+        assertTrackHierarchy(result.get(2), "GroupB", true, 0, 1);
+        assertTrackHierarchy(result.get(3), "ChildB1", false, 2, 2);
+        assertTrackHierarchy(result.get(4), "ChildB2", false, 2, 2);
+        assertTrackHierarchy(result.get(5), "ChildA2", false, 0, 1);
+        assertTrackHierarchy(result.get(6), "Top", false, null, 0);
+    }
+
+    /**
+     * Verifies that for an entirely flat project (no groups), every track is top-level: depth 0 and a null
+     * parent_group_index, preserving the pre-existing behaviour for consumers.
+     */
+    @Test
+    void testGetAllTracksInfo_FlatProjectAllTopLevel() {
+        Track rootGroup = mock(Track.class);
+        Project hierarchyProject = mock(Project.class);
+        when(mockHost.getProject()).thenReturn(hierarchyProject);
+        when(hierarchyProject.getRootTrackGroup()).thenReturn(rootGroup);
+
+        Track[] tracks = new Track[] {
+            buildHierarchyTrack("Track 1", "AUDIO", false, 0, rootGroup),
+            buildHierarchyTrack("Track 2", "INSTRUMENT", false, 0, rootGroup),
+            buildHierarchyTrack("Track 3", "AUDIO", false, 0, rootGroup),
+        };
+        when(mockTrackBank.getSizeOfBank()).thenReturn(tracks.length);
+        for (int i = 0; i < tracks.length; i++) {
+            when(mockTrackBank.getItemAt(i)).thenReturn(tracks[i]);
+        }
+
+        com.bitwig.extension.controller.api.BooleanValue cursorExists = mock(com.bitwig.extension.controller.api.BooleanValue.class);
+        when(cursorExists.get()).thenReturn(false);
+        when(mockCursorTrack.exists()).thenReturn(cursorExists);
+
+        BitwigApiFacade facade = new BitwigApiFacade(mockHost, mockLogger);
+        java.util.List<java.util.Map<String, Object>> result = facade.getAllTracksInfo(null);
+
+        assertEquals(3, result.size());
+        for (java.util.Map<String, Object> t : result) {
+            assertNull(t.get("parent_group_index"), "Top-level track must have null parent_group_index");
+            assertEquals(0, t.get("depth"), "Top-level track must have depth 0");
+        }
+    }
+
+    /**
+     * Verifies that the type filter still returns nested children whose parent references remain correct,
+     * since the hierarchy is computed over the full (unfiltered) bank.
+     */
+    @Test
+    void testGetAllTracksInfo_FilterKeepsNestedParentReferences() {
+        Track rootGroup = mock(Track.class);
+        Project hierarchyProject = mock(Project.class);
+        when(mockHost.getProject()).thenReturn(hierarchyProject);
+        when(hierarchyProject.getRootTrackGroup()).thenReturn(rootGroup);
+
+        Track[] tracks = new Track[] {
+            buildHierarchyTrack("GroupA", "GROUP", true, 0, rootGroup),
+            buildHierarchyTrack("ChildAudio", "AUDIO", false, 1, rootGroup),
+            buildHierarchyTrack("ChildInstr", "INSTRUMENT", false, 1, rootGroup),
+        };
+        when(mockTrackBank.getSizeOfBank()).thenReturn(tracks.length);
+        for (int i = 0; i < tracks.length; i++) {
+            when(mockTrackBank.getItemAt(i)).thenReturn(tracks[i]);
+        }
+
+        com.bitwig.extension.controller.api.BooleanValue cursorExists = mock(com.bitwig.extension.controller.api.BooleanValue.class);
+        when(cursorExists.get()).thenReturn(false);
+        when(mockCursorTrack.exists()).thenReturn(cursorExists);
+
+        BitwigApiFacade facade = new BitwigApiFacade(mockHost, mockLogger);
+        java.util.List<java.util.Map<String, Object>> audioOnly = facade.getAllTracksInfo("audio");
+
+        assertEquals(1, audioOnly.size(), "Only the nested audio child matches the filter");
+        // The nested audio child still references GroupA (absolute bank index 0) as its parent.
+        assertTrackHierarchy(audioOnly.get(0), "ChildAudio", false, 0, 1);
+    }
+
+    private void assertTrackHierarchy(java.util.Map<String, Object> track, String name, boolean isGroup,
+                                      Integer expectedParentIndex, int expectedDepth) {
+        assertEquals(name, track.get("name"), "track name");
+        assertEquals(isGroup, track.get("is_group"), "is_group for " + name);
+        assertEquals(expectedParentIndex, track.get("parent_group_index"), "parent_group_index for " + name);
+        assertEquals(expectedDepth, track.get("depth"), "depth for " + name);
     }
 }
