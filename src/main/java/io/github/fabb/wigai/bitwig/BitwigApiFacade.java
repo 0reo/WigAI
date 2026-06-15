@@ -37,11 +37,6 @@ public class BitwigApiFacade {
         public static final int SIXTEENTHS_PER_BEAT = 4;
         public static final int DEVICE_PARAMETER_COUNT = 8;
         public static final int PROJECT_PARAMETER_COUNT = 8;
-        // Maximum group nesting depth we resolve for parent/depth computation.
-        // Bitwig itself has no hard limit, but in practice projects rarely nest
-        // beyond a handful of levels; tracks deeper than this are reported with
-        // a clamped depth and best-effort parent.
-        public static final int MAX_GROUP_NESTING_DEPTH = 8;
 
         private Constants() {} // Prevent instantiation
     }
@@ -1142,15 +1137,24 @@ public class BitwigApiFacade {
         // recent" disambiguates duplicate group names by nearest ancestor.
         java.util.Map<String, Integer> lastGroupIndexByName = new java.util.HashMap<>();
 
-        // Each slot is guarded independently: a read failure on one track must NOT abort the walk, because the running
-        // lastGroupIndexByName state drives parent resolution for every subsequent track.
+        // Each slot is guarded independently so a read failure on one track does not abort the walk. Crucially, parent
+        // resolution and group registration are in SEPARATE try blocks: a group whose parent read fails must still be
+        // registered in lastGroupIndexByName, otherwise its nested children would silently resolve to top-level.
         for (int i = 0; i < bankSize; i++) {
+            Track track = trackBank.getItemAt(i);
+            boolean exists;
             try {
-                Track track = trackBank.getItemAt(i);
-                if (!track.exists().get()) {
-                    continue; // Leave defaults (depth 0, null parent) for empty slots; they are never emitted.
-                }
+                exists = track.exists().get();
+            } catch (Exception e) {
+                logger.error("BitwigApiFacade: Failed to read existence of track at bank index " + i + ": " + e.getMessage());
+                continue;
+            }
+            if (!exists) {
+                continue; // Leave defaults (depth 0, null parent) for empty slots; they are never emitted.
+            }
 
+            // (a) Resolve this track's depth + parent group index from its direct parent.
+            try {
                 Track parent = (i < directParentTracks.size()) ? directParentTracks.get(i) : null;
                 String parentName = (parent != null && parent.exists().get()) ? parent.name().get() : null;
 
@@ -1160,14 +1164,20 @@ public class BitwigApiFacade {
                 }
                 parentGroupIndex[i] = parentIdx;
                 depth[i] = (parentIdx == null) ? 0 : depth[parentIdx] + 1;
+            } catch (Exception e) {
+                logger.error("BitwigApiFacade: Failed to resolve parent for track at bank index " + i
+                    + "; it defaults to depth 0/no parent: " + e.getMessage());
+            }
 
-                // Register this track as a candidate parent for subsequent tracks if it is a group.
+            // (b) Register this track as a candidate parent for subsequent tracks if it is a group. Independent of (a)
+            // so a parent-resolution failure above does not drop this group as a parent for its children.
+            try {
                 if (track.isGroup().get()) {
                     lastGroupIndexByName.put(track.name().get(), i);
                 }
             } catch (Exception e) {
-                logger.error("BitwigApiFacade: Failed to compute hierarchy for track at bank index " + i
-                    + "; it defaults to depth 0/no parent and may mis-parent nested children: " + e.getMessage());
+                logger.error("BitwigApiFacade: Could not register group at bank index " + i
+                    + "; its nested children may mis-parent: " + e.getMessage());
             }
         }
 

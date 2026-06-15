@@ -1021,6 +1021,53 @@ public class BitwigApiFacadeTest {
         assertTrackHierarchy(audioOnly.get(0), "ChildAudio", false, 0, 1);
     }
 
+    /**
+     * Regression test for the silent-failure review finding: a group whose direct-parent read throws during hierarchy
+     * resolution must still be registered as a parent candidate, so its nested children resolve to it rather than
+     * silently appearing as top-level. Guards the separation of parent-resolution and group-registration try blocks.
+     */
+    @Test
+    void testGetAllTracksInfo_GroupRegistrationSurvivesParentReadFailure() {
+        Track rootGroup = buildRootGroup("Project");
+        Project hierarchyProject = mock(Project.class);
+        when(mockHost.getProject()).thenReturn(hierarchyProject);
+        when(hierarchyProject.getRootTrackGroup()).thenReturn(rootGroup);
+
+        Track groupA = buildHierarchyTrack("GroupA", "GROUP", true, "ignored");
+        // Make GroupA's direct-parent read throw: parent resolution for GroupA fails, but its group registration
+        // (isGroup + name reads) must still succeed so children can find it.
+        Track throwingParent = mock(Track.class);
+        com.bitwig.extension.controller.api.BooleanValue tpe = mock(com.bitwig.extension.controller.api.BooleanValue.class);
+        lenient().when(tpe.get()).thenReturn(true);
+        lenient().when(throwingParent.exists()).thenReturn(tpe);
+        com.bitwig.extension.controller.api.SettableStringValue tpn = mock(com.bitwig.extension.controller.api.SettableStringValue.class);
+        lenient().when(tpn.get()).thenThrow(new RuntimeException("simulated parent read failure"));
+        lenient().when(throwingParent.name()).thenReturn(tpn);
+        lenient().when(groupA.createParentTrack(0, 0)).thenReturn(throwingParent);
+
+        Track[] tracks = new Track[] {
+            groupA,
+            buildHierarchyTrack("Child", "AUDIO", false, "GroupA"),
+        };
+        when(mockTrackBank.getSizeOfBank()).thenReturn(tracks.length);
+        for (int i = 0; i < tracks.length; i++) {
+            when(mockTrackBank.getItemAt(i)).thenReturn(tracks[i]);
+        }
+
+        com.bitwig.extension.controller.api.BooleanValue cursorExists = mock(com.bitwig.extension.controller.api.BooleanValue.class);
+        when(cursorExists.get()).thenReturn(false);
+        when(mockCursorTrack.exists()).thenReturn(cursorExists);
+
+        BitwigApiFacade facade = new BitwigApiFacade(mockHost, mockLogger);
+        java.util.List<java.util.Map<String, Object>> result = facade.getAllTracksInfo(null);
+
+        assertEquals(2, result.size());
+        // GroupA's own parent read failed -> it defaults to depth 0 / null parent...
+        assertTrackHierarchy(result.get(0), "GroupA", true, null, 0);
+        // ...but it was still registered, so its child resolves to it (index 0), NOT silently top-level.
+        assertTrackHierarchy(result.get(1), "Child", false, 0, 1);
+    }
+
     private void assertTrackHierarchy(java.util.Map<String, Object> track, String name, boolean isGroup,
                                       Integer expectedParentIndex, int expectedDepth) {
         assertEquals(name, track.get("name"), "track name");
