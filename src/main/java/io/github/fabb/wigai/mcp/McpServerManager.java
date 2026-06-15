@@ -23,6 +23,7 @@ import io.github.fabb.wigai.mcp.tool.GetTrackDetailsTool;
 import io.github.fabb.wigai.mcp.tool.GetDeviceDetailsTool;
 import io.github.fabb.wigai.mcp.tool.ListScenesTool;
 import io.github.fabb.wigai.mcp.tool.GetClipsInSceneTool;
+import io.github.fabb.wigai.mcp.tool.GetSelectedArrangerClipTool;
 import io.modelcontextprotocol.spec.McpSchema;
 import com.bitwig.extension.controller.api.ControllerHost;
 import io.github.fabb.wigai.mcp.tool.SceneByNameTool;
@@ -152,7 +153,8 @@ public class McpServerManager {
                 ListDevicesOnTrackTool.specification(bitwigApiFacade, structuredLogger),
                 GetTrackDetailsTool.specification(bitwigApiFacade, structuredLogger),
                 ListScenesTool.specification(bitwigApiFacade, structuredLogger),
-                GetClipsInSceneTool.getClipsInSceneSpecification(clipSceneController, structuredLogger)
+                GetClipsInSceneTool.getClipsInSceneSpecification(clipSceneController, structuredLogger),
+                GetSelectedArrangerClipTool.specification(clipSceneController, structuredLogger)
             )
             .build();
 

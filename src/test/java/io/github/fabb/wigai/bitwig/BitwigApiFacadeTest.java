@@ -80,6 +80,9 @@ public class BitwigApiFacadeTest {
     @Mock
     private Send mockSend;
 
+    @Mock
+    private Clip mockArrangerClip;
+
     private BitwigApiFacade bitwigApiFacade;
 
     @BeforeEach
@@ -280,6 +283,21 @@ public class BitwigApiFacadeTest {
         // Setup parameter count mocks
         when(mockParameterBank.getParameterCount()).thenReturn(8);  // Default to 8 for device parameters
         when(mockProjectParameterBank.getParameterCount()).thenReturn(8);  // Default to 8 for project parameters
+
+        // Setup arranger cursor clip mocks (single selection-following cursor clip)
+        when(mockHost.createArrangerCursorClip(1, 1)).thenReturn(mockArrangerClip);
+        lenient().when(mockArrangerClip.exists()).thenReturn(mock(com.bitwig.extension.controller.api.BooleanValue.class));
+        lenient().when(mockArrangerClip.getPlayStart()).thenReturn(mock(com.bitwig.extension.controller.api.SettableBeatTimeValue.class));
+        lenient().when(mockArrangerClip.getPlayStop()).thenReturn(mock(com.bitwig.extension.controller.api.SettableBeatTimeValue.class));
+        lenient().when(mockArrangerClip.isLoopEnabled()).thenReturn(mock(com.bitwig.extension.controller.api.SettableBooleanValue.class));
+        lenient().when(mockArrangerClip.getLoopStart()).thenReturn(mock(com.bitwig.extension.controller.api.SettableBeatTimeValue.class));
+        lenient().when(mockArrangerClip.getLoopLength()).thenReturn(mock(com.bitwig.extension.controller.api.SettableBeatTimeValue.class));
+        lenient().when(mockArrangerClip.color()).thenReturn(mock(com.bitwig.extension.controller.api.SettableColorValue.class));
+        Track mockArrangerClipTrack = mock(Track.class);
+        lenient().when(mockArrangerClipTrack.name()).thenReturn(mock(com.bitwig.extension.controller.api.SettableStringValue.class));
+        lenient().when(mockArrangerClipTrack.position()).thenReturn(mock(com.bitwig.extension.controller.api.IntegerValue.class));
+        lenient().when(mockArrangerClipTrack.exists()).thenReturn(mock(com.bitwig.extension.controller.api.BooleanValue.class));
+        lenient().when(mockArrangerClip.getTrack()).thenReturn(mockArrangerClipTrack);
 
         bitwigApiFacade = new BitwigApiFacade(mockHost, mockLogger);
     }
@@ -788,6 +806,127 @@ public class BitwigApiFacadeTest {
 
         // Verify logging
         verify(mockLogger).info("BitwigApiFacade: Getting all scenes info");
+    }
+
+    @Test
+    void testGetSelectedArrangerClipInfo_ClipSelected() {
+        // Arrange: arranger clip exists with a timeline range and owning track
+        com.bitwig.extension.controller.api.BooleanValue mockExists = mock(com.bitwig.extension.controller.api.BooleanValue.class);
+        when(mockExists.get()).thenReturn(true);
+        when(mockArrangerClip.exists()).thenReturn(mockExists);
+
+        com.bitwig.extension.controller.api.SettableBeatTimeValue mockPlayStart = mock(com.bitwig.extension.controller.api.SettableBeatTimeValue.class);
+        when(mockPlayStart.get()).thenReturn(4.0);
+        when(mockArrangerClip.getPlayStart()).thenReturn(mockPlayStart);
+
+        com.bitwig.extension.controller.api.SettableBeatTimeValue mockPlayStop = mock(com.bitwig.extension.controller.api.SettableBeatTimeValue.class);
+        when(mockPlayStop.get()).thenReturn(12.0);
+        when(mockArrangerClip.getPlayStop()).thenReturn(mockPlayStop);
+
+        com.bitwig.extension.controller.api.SettableBooleanValue mockLoopEnabled = mock(com.bitwig.extension.controller.api.SettableBooleanValue.class);
+        when(mockLoopEnabled.get()).thenReturn(true);
+        when(mockArrangerClip.isLoopEnabled()).thenReturn(mockLoopEnabled);
+
+        com.bitwig.extension.controller.api.SettableBeatTimeValue mockLoopStart = mock(com.bitwig.extension.controller.api.SettableBeatTimeValue.class);
+        when(mockLoopStart.get()).thenReturn(4.0);
+        when(mockArrangerClip.getLoopStart()).thenReturn(mockLoopStart);
+
+        com.bitwig.extension.controller.api.SettableBeatTimeValue mockLoopLength = mock(com.bitwig.extension.controller.api.SettableBeatTimeValue.class);
+        when(mockLoopLength.get()).thenReturn(8.0);
+        when(mockArrangerClip.getLoopLength()).thenReturn(mockLoopLength);
+
+        // Owning track of the clip
+        Track mockClipTrack = mock(Track.class);
+        com.bitwig.extension.controller.api.BooleanValue mockTrackExists = mock(com.bitwig.extension.controller.api.BooleanValue.class);
+        when(mockTrackExists.get()).thenReturn(true);
+        when(mockClipTrack.exists()).thenReturn(mockTrackExists);
+        com.bitwig.extension.controller.api.SettableStringValue mockTrackName = mock(com.bitwig.extension.controller.api.SettableStringValue.class);
+        when(mockTrackName.get()).thenReturn("Bass");
+        when(mockClipTrack.name()).thenReturn(mockTrackName);
+        when(mockArrangerClip.getTrack()).thenReturn(mockClipTrack);
+
+        // Make the track bank resolve "Bass" to index 2
+        when(mockTrackBank.getSizeOfBank()).thenReturn(8);
+        Track bankTrack = mock(Track.class);
+        com.bitwig.extension.controller.api.BooleanValue bankTrackExists = mock(com.bitwig.extension.controller.api.BooleanValue.class);
+        when(bankTrackExists.get()).thenReturn(true);
+        when(bankTrack.exists()).thenReturn(bankTrackExists);
+        com.bitwig.extension.controller.api.SettableStringValue bankTrackName = mock(com.bitwig.extension.controller.api.SettableStringValue.class);
+        when(bankTrackName.get()).thenReturn("Bass");
+        when(bankTrack.name()).thenReturn(bankTrackName);
+        when(mockTrackBank.getItemAt(2)).thenReturn(bankTrack);
+        // Other indices: tracks that don't match
+        Track otherTrack = mock(Track.class);
+        com.bitwig.extension.controller.api.BooleanValue otherExists = mock(com.bitwig.extension.controller.api.BooleanValue.class);
+        when(otherExists.get()).thenReturn(true);
+        when(otherTrack.exists()).thenReturn(otherExists);
+        com.bitwig.extension.controller.api.SettableStringValue otherName = mock(com.bitwig.extension.controller.api.SettableStringValue.class);
+        when(otherName.get()).thenReturn("Other");
+        when(otherTrack.name()).thenReturn(otherName);
+        for (int i = 0; i < 8; i++) {
+            if (i != 2) {
+                when(mockTrackBank.getItemAt(i)).thenReturn(otherTrack);
+            }
+        }
+
+        // Act
+        java.util.Map<String, Object> result = bitwigApiFacade.getSelectedArrangerClipInfo();
+
+        // Assert
+        assertNotNull(result);
+        assertEquals(true, result.get("has_selected_arranger_clip"));
+        assertEquals(4.0, result.get("start"));
+        assertEquals(8.0, result.get("length")); // playStop - playStart = 12 - 4
+        assertEquals(12.0, result.get("play_stop"));
+        assertEquals(true, result.get("loop_enabled"));
+        assertEquals(4.0, result.get("loop_start"));
+        assertEquals(8.0, result.get("loop_length"));
+        assertEquals("Bass", result.get("track_name"));
+        assertEquals(2, result.get("track_index"));
+    }
+
+    @Test
+    void testGetSelectedArrangerClipInfo_NoClipSelected() {
+        // Arrange: arranger clip does not exist (nothing selected in the arranger)
+        com.bitwig.extension.controller.api.BooleanValue mockExists = mock(com.bitwig.extension.controller.api.BooleanValue.class);
+        when(mockExists.get()).thenReturn(false);
+        when(mockArrangerClip.exists()).thenReturn(mockExists);
+
+        // Act
+        java.util.Map<String, Object> result = bitwigApiFacade.getSelectedArrangerClipInfo();
+
+        // Assert
+        assertNotNull(result);
+        assertEquals(false, result.get("has_selected_arranger_clip"));
+        assertNull(result.get("start"));
+        assertNull(result.get("length"));
+        assertNull(result.get("play_stop"));
+        assertNull(result.get("loop_enabled"));
+        assertNull(result.get("loop_start"));
+        assertNull(result.get("loop_length"));
+        assertNull(result.get("track_name"));
+        assertNull(result.get("track_index"));
+        // Keys must be present even when no clip is selected
+        assertTrue(result.containsKey("start"));
+        assertTrue(result.containsKey("track_index"));
+    }
+
+    @Test
+    void testGetSelectedArrangerClipInfo_ApiErrorPropagates() {
+        // Arrange: reading the clip's timeline data throws a runtime error from the host.
+        // This must surface as a distinct error, NOT masquerade as "no clip selected".
+        com.bitwig.extension.controller.api.BooleanValue mockExists = mock(com.bitwig.extension.controller.api.BooleanValue.class);
+        when(mockExists.get()).thenReturn(true);
+        when(mockArrangerClip.exists()).thenReturn(mockExists);
+
+        com.bitwig.extension.controller.api.SettableBeatTimeValue mockPlayStart = mock(com.bitwig.extension.controller.api.SettableBeatTimeValue.class);
+        when(mockPlayStart.get()).thenThrow(new RuntimeException("host error"));
+        when(mockArrangerClip.getPlayStart()).thenReturn(mockPlayStart);
+
+        // Act & Assert
+        BitwigApiException ex = assertThrows(BitwigApiException.class,
+            () -> bitwigApiFacade.getSelectedArrangerClipInfo());
+        assertEquals(ErrorCode.BITWIG_API_ERROR, ex.getErrorCode());
     }
 
     @Test
